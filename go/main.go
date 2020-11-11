@@ -45,7 +45,8 @@ type Pixel struct {
 const threads = 16           // How many threads to use in parallel rendering
 const width = 320            // Render area width in pixels
 const height = 240           // Render area height in pixels
-const contrast = 2.0         // A multiplier to shading, to increase or decrease contrast of the overall image
+const contrast = 0.01        // A multiplier to shading, to increase or decrease contrast of the overall image
+const ambient = 0.0          // Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
 const fov = 90.0             // Field of vision (in degrees)
 const filename = "duck2.stl" // File to load (the 3d mesh)
 const filescale = 0.07       // Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
@@ -238,6 +239,17 @@ func InsidePolygon(a float64, b float64, corners [][2]float64) bool {
 	return inside
 }
 
+// Limit a value between 0.0 and 1.0
+func Limit(value float64) float64 {
+	if value > 1.0 {
+		return 1.0
+	}
+	if value < 0.0 {
+		return 0.0
+	}
+	return value
+}
+
 // Render rows between y1 and y2 to an image
 func Render(y1 int, y2 int, img *image.RGBA, vertexes *[]Vertex, faces *[]Face, light Vertex, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -249,6 +261,7 @@ func Render(y1 int, y2 int, img *image.RGBA, vertexes *[]Vertex, faces *[]Face, 
 			img.Set(int(x), int(y), color.RGBA{0, 0, uint8(y / height * 64), 255})
 
 			// Angle of the camera ray. They open up outwards from a single 3d-vertex (0,0,0) at the center of the image, which creates illusion of perspective.
+			// Also convert FOV in degrees to radians
 			cax := (x - width/2) * fov * 0.01745329 / height
 			cay := (y - height/2) * fov * 0.01745329 / height
 
@@ -262,39 +275,51 @@ func Render(y1 int, y2 int, img *image.RGBA, vertexes *[]Vertex, faces *[]Face, 
 				polygonPoints := [][2]float64{{(*vertexes)[f.a].xa, (*vertexes)[f.a].ya}, {(*vertexes)[f.b].xa, (*vertexes)[f.b].ya}, {(*vertexes)[f.c].xa, (*vertexes)[f.c].ya}}
 				if InsidePolygon(cax, cay, polygonPoints) == true {
 
-					// Calculate at with depth the polygon we hit is at (for depth sorting, as we might hit more polygons at different depths with the same camera ray)
+					// Calculate at with depth the polygon we just hit is at (for depth sorting, as we might hit more polygons at different depths with the same camera ray)
 					avgdepth := ((*vertexes)[f.a].z + (*vertexes)[f.b].z + (*vertexes)[f.c].z) / 3
 
 					if (pixelFound == false) || (avgdepth < foremostPixel.depth) {
 
-						// Calculate angle between the omni light source and the polygon hit by camera
+						// Calculate angle between the omni light source and the polygon
 						laxa := math.Atan2((*vertexes)[f.a].x-light.x, (*vertexes)[f.a].z-light.z)
 						laya := math.Atan2((*vertexes)[f.a].y-light.y, (*vertexes)[f.a].z-light.z)
 						laxb := math.Atan2((*vertexes)[f.b].x-light.x, (*vertexes)[f.b].z-light.z)
 						layb := math.Atan2((*vertexes)[f.b].y-light.y, (*vertexes)[f.b].z-light.z)
 						laxc := math.Atan2((*vertexes)[f.c].x-light.x, (*vertexes)[f.c].z-light.z)
 						layc := math.Atan2((*vertexes)[f.c].y-light.y, (*vertexes)[f.c].z-light.z)
-						lax := (laxa + laxb + laxc) / 3
-						lay := (laya + layb + layc) / 3
-						la := (lax + lay) / 2
 
-						// Calculate color of the pixel, or polygon, from the angles
-						r := ((*vertexes)[f.a].r + (*vertexes)[f.b].r + (*vertexes)[f.c].r) / 3 * math.Abs(la) * contrast * light.r
-						g := ((*vertexes)[f.a].g + (*vertexes)[f.b].g + (*vertexes)[f.c].g) / 3 * math.Abs(la) * contrast * light.g
-						b := ((*vertexes)[f.a].b + (*vertexes)[f.b].b + (*vertexes)[f.c].b) / 3 * math.Abs(la) * contrast * light.b
+						// Average one brightness factor from the two angle pairs / vertex
+						// Need absolute, otherwise negative half gets cut into black color
+						laa := math.Abs(laxa+laya) / 2
+						lab := math.Abs(laxb+layb) / 2
+						lac := math.Abs(laxc+layc) / 2
+
+						// Calculate average color of the polygon, taking into account angle and contrast value
+						ra := (*vertexes)[f.a].r / laa * light.r * contrast
+						ga := (*vertexes)[f.a].g / laa * light.g * contrast
+						ba := (*vertexes)[f.a].b / laa * light.b * contrast
+
+						rb := (*vertexes)[f.b].r / lab * light.r * contrast
+						gb := (*vertexes)[f.b].g / lab * light.g * contrast
+						bb := (*vertexes)[f.b].b / lab * light.b * contrast
+
+						rc := (*vertexes)[f.c].r / lac * light.r * contrast
+						gc := (*vertexes)[f.c].g / lac * light.g * contrast
+						bc := (*vertexes)[f.c].b / lac * light.b * contrast
+
+						// Distance along surface from vertexes to where the camera ray hit the surface
+						da := math.Sqrt(math.Pow(laxa-cax, 2)+math.Pow(laya-cay, 2)) / 3
+						db := math.Sqrt(math.Pow(laxb-cax, 2)+math.Pow(layb-cay, 2)) / 3
+						dc := math.Sqrt(math.Pow(laxc-cax, 2)+math.Pow(layc-cay, 2)) / 3
+
+						// Let color be determined by each corner of polygon and how far the camera ray is from those corners
+						// Also apply contrast adjustment and ambient light level
+						r := ((ra/da)+(rb/db)+(rc/dc))/3 + ambient
+						g := ((ga/da)+(gb/db)+(gc/dc))/3 + ambient
+						b := ((ba/da)+(bb/db)+(bc/dc))/3 + ambient
 
 						// Keep color below 1.0 to avoid clitches when going overbright
-						if r > 1 {
-							r = 1
-						}
-						if g > 1 {
-							g = 1
-						}
-						if b > 1 {
-							b = 1
-						}
-
-						foremostPixel = Pixel{avgdepth, r, g, b}
+						foremostPixel = Pixel{avgdepth, Limit(r), Limit(g), Limit(b)}
 						pixelFound = true
 					}
 				}
@@ -344,8 +369,7 @@ func Engine(s screen.Screen, w screen.Window, vertexes *[]Vertex, faces *[]Face)
 		//lightG := 1.0
 		//lightB := 1.0
 
-		light := Vertex{math.Sin(frame/10) * 100, 50, 0, lightR, lightG, lightB, 0, 0}
-		//light := Vertex{0, 0, 0, lightr, lightg, lightb, 0, 0}
+		light := Vertex{math.Sin(frame/10) * 160, math.Sin(frame/7) * 120, -500, lightR, lightG, lightB, 0, 0}
 
 		// Render in threads, dividing the image vertically to partitions. Big speed up with multi core processors.
 		start := time.Now() // Begin taking time

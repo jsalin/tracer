@@ -45,11 +45,13 @@ type Pixel struct {
 const threads = 16           // How many threads to use in parallel rendering
 const width = 320            // Render area width in pixels
 const height = 240           // Render area height in pixels
-const contrast = 0.01        // A multiplier to shading, to increase or decrease contrast of the overall image
+const contrastDiffuse = 0.05 // A multiplier to shading, to increase or decrease contrast of the overall image
+const contrastSpecular = 0.5 // A multiplier to shading, to increase or decrease contrast of the overall image
 const ambient = 0.0          // Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
 const fov = 90.0             // Field of vision (in degrees)
 const filename = "duck2.stl" // File to load (the 3d mesh)
 const filescale = 0.07       // Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
+const speed = 1.0            // Speed multiplier for animation
 
 // LoadSTL loads ascii STL file. Works with a single mesh with three vertex faces only.
 func LoadSTL(filename string) ([]Vertex, []Face) {
@@ -142,7 +144,7 @@ func LoadSTL(filename string) ([]Vertex, []Face) {
 
 	// Report
 	fmt.Println("Read", len(vertexes), "unique vertexes in", len(faces), "faces.")
-	fmt.Printf("Mesh dimensions: X: %f to %f, Y: %f to %f, Z: %f to %f\n", xmin, xmax, ymin, ymax, zmin, zmax)
+	fmt.Printf("Mesh dimensions: X: %.2f to %.2f, Y: %.2f to %.2f, Z: %.2f to %.2f\n", xmin, xmax, ymin, ymax, zmin, zmax)
 
 	return vertexes, faces
 }
@@ -281,42 +283,41 @@ func Render(y1 int, y2 int, img *image.RGBA, vertexes *[]Vertex, faces *[]Face, 
 					if (pixelFound == false) || (avgdepth < foremostPixel.depth) {
 
 						// Calculate angle between the omni light source and the polygon
-						laxa := math.Atan2((*vertexes)[f.a].x-light.x, (*vertexes)[f.a].z-light.z)
-						laya := math.Atan2((*vertexes)[f.a].y-light.y, (*vertexes)[f.a].z-light.z)
-						laxb := math.Atan2((*vertexes)[f.b].x-light.x, (*vertexes)[f.b].z-light.z)
-						layb := math.Atan2((*vertexes)[f.b].y-light.y, (*vertexes)[f.b].z-light.z)
-						laxc := math.Atan2((*vertexes)[f.c].x-light.x, (*vertexes)[f.c].z-light.z)
-						layc := math.Atan2((*vertexes)[f.c].y-light.y, (*vertexes)[f.c].z-light.z)
+						laxa := -math.Atan2((*vertexes)[f.a].x-light.x, (*vertexes)[f.a].z-light.z)
+						laya := -math.Atan2((*vertexes)[f.a].y-light.y, (*vertexes)[f.a].z-light.z)
+						laxb := -math.Atan2((*vertexes)[f.b].x-light.x, (*vertexes)[f.b].z-light.z)
+						layb := -math.Atan2((*vertexes)[f.b].y-light.y, (*vertexes)[f.b].z-light.z)
+						laxc := -math.Atan2((*vertexes)[f.c].x-light.x, (*vertexes)[f.c].z-light.z)
+						layc := -math.Atan2((*vertexes)[f.c].y-light.y, (*vertexes)[f.c].z-light.z)
 
-						// Average one brightness factor from the two angle pairs / vertex
-						// Need absolute, otherwise negative half gets cut into black color
-						laa := math.Abs(laxa+laya) / 2
-						lab := math.Abs(laxb+layb) / 2
-						lac := math.Abs(laxc+layc) / 2
+						// Average one brightness factor from the two angle pairs per vertex
+						laa := math.Sqrt(math.Pow(laxa, 2) + math.Pow(laya, 2))
+						lab := math.Sqrt(math.Pow(laxb, 2) + math.Pow(layb, 2))
+						lac := math.Sqrt(math.Pow(laxc, 2) + math.Pow(layc, 2))
 
-						// Calculate average color of the polygon, taking into account angle and contrast value
-						ra := (*vertexes)[f.a].r / laa * light.r * contrast
-						ga := (*vertexes)[f.a].g / laa * light.g * contrast
-						ba := (*vertexes)[f.a].b / laa * light.b * contrast
+						// Calculate colour for each vertex for gouraud shading, taking into account angle to light source and diffuse contrast
+						ra := (*vertexes)[f.a].r / laa * light.r * contrastDiffuse
+						ga := (*vertexes)[f.a].g / laa * light.g * contrastDiffuse
+						ba := (*vertexes)[f.a].b / laa * light.b * contrastDiffuse
 
-						rb := (*vertexes)[f.b].r / lab * light.r * contrast
-						gb := (*vertexes)[f.b].g / lab * light.g * contrast
-						bb := (*vertexes)[f.b].b / lab * light.b * contrast
+						rb := (*vertexes)[f.b].r / lab * light.r * contrastDiffuse
+						gb := (*vertexes)[f.b].g / lab * light.g * contrastDiffuse
+						bb := (*vertexes)[f.b].b / lab * light.b * contrastDiffuse
 
-						rc := (*vertexes)[f.c].r / lac * light.r * contrast
-						gc := (*vertexes)[f.c].g / lac * light.g * contrast
-						bc := (*vertexes)[f.c].b / lac * light.b * contrast
+						rc := (*vertexes)[f.c].r / lac * light.r * contrastDiffuse
+						gc := (*vertexes)[f.c].g / lac * light.g * contrastDiffuse
+						bc := (*vertexes)[f.c].b / lac * light.b * contrastDiffuse
 
 						// Distance along surface from vertexes to where the camera ray hit the surface
-						da := math.Sqrt(math.Pow(laxa-cax, 2)+math.Pow(laya-cay, 2)) / 3
-						db := math.Sqrt(math.Pow(laxb-cax, 2)+math.Pow(layb-cay, 2)) / 3
-						dc := math.Sqrt(math.Pow(laxc-cax, 2)+math.Pow(layc-cay, 2)) / 3
+						da := math.Sqrt(math.Pow(laxa-cax, 2)+math.Pow(laya-cay, 2)) / contrastSpecular
+						db := math.Sqrt(math.Pow(laxb-cax, 2)+math.Pow(layb-cay, 2)) / contrastSpecular
+						dc := math.Sqrt(math.Pow(laxc-cax, 2)+math.Pow(layc-cay, 2)) / contrastSpecular
 
 						// Let color be determined by each corner of polygon and how far the camera ray is from those corners
-						// Also apply contrast adjustment and ambient light level
-						r := ((ra/da)+(rb/db)+(rc/dc))/3 + ambient
-						g := ((ga/da)+(gb/db)+(gc/dc))/3 + ambient
-						b := ((ba/da)+(bb/db)+(bc/dc))/3 + ambient
+						// Also apply ambient light level
+						r := ((ra / da) + (rb / db) + (rc / dc)) + ambient
+						g := ((ga / da) + (gb / db) + (gc / dc)) + ambient
+						b := ((ba / da) + (bb / db) + (bc / dc)) + ambient
 
 						// Keep color below 1.0 to avoid clitches when going overbright
 						foremostPixel = Pixel{avgdepth, Limit(r), Limit(g), Limit(b)}
@@ -340,12 +341,12 @@ func Engine(s screen.Screen, w screen.Window, vertexes *[]Vertex, faces *[]Face)
 	var frame float64 = 0
 
 	for {
-		fmt.Print("Frame ", frame)
+		fmt.Printf("Frame %.0f", frame/speed)
 
 		// Transform vertexes to different position, angle etc. for each frame to archieve animation
 		transformed := CopyVertexes(vertexes)
 		RotateVertexes(frame/20, frame/25, frame/30, &transformed)
-		MoveVertexes(0, 0, 200+math.Sin(frame/5)*20, &transformed)
+		MoveVertexes(0, 0, 200+math.Sin(frame/10)*50, &transformed) // 200 5 20
 
 		// Create a shiny buffer for the new rendered image
 		size := image.Point{width, height}
@@ -369,7 +370,8 @@ func Engine(s screen.Screen, w screen.Window, vertexes *[]Vertex, faces *[]Face)
 		//lightG := 1.0
 		//lightB := 1.0
 
-		light := Vertex{math.Sin(frame/10) * 160, math.Sin(frame/7) * 120, -500, lightR, lightG, lightB, 0, 0}
+		//light := Vertex{math.Sin(frame/10) * 80, math.Sin(frame/7) * 60, -100, lightR, lightG, lightB, 0, 0}
+		light := Vertex{math.Sin(frame/10) * 160, math.Sin(frame/7) * 160, -500, lightR, lightG, lightB, 0, 0}
 
 		// Render in threads, dividing the image vertically to partitions. Big speed up with multi core processors.
 		start := time.Now() // Begin taking time
@@ -397,7 +399,7 @@ func Engine(s screen.Screen, w screen.Window, vertexes *[]Vertex, faces *[]Face)
 		t0.Release()
 		b.Release()
 
-		frame++
+		frame += speed
 	}
 }
 

@@ -21,4 +21,6 @@ Directory structure:
 - "videos" has some videos of the tracer in action (few of earlier stages before pushing to GitHub)
 - "screenshots" has some still screen shots, including interesting looking clitches that occurred during development
 
-There is also a higher quality output video at: https://youtu.be/D9EQBfdgmTY
+There is also a few higher quality sample videos outside GitHub, that were not rendered in real-time:
+- https://youtu.be/D9EQBfdgmTY
+- https://youtu.be/7mgVlcHT6SM

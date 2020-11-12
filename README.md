@@ -20,3 +20,5 @@ Directory structure:
 - "go" has the code and data files
 - "videos" has some videos of the tracer in action (few of earlier stages before pushing to GitHub)
 - "screenshots" has some still screen shots, including interesting looking clitches that occurred during development
+
+There is also a higher quality output video at: https://youtu.be/D9EQBfdgmTY

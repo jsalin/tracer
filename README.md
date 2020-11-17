@@ -13,13 +13,13 @@ The included example STL files are the duck from 3D Studio examples and a simple
 
 Ideas for future improvements:
 - add more optimizations than the per-vertex atan2 pre-calc (which was already huge improvement alone, like 10x)
-- port to C++ to test if there are any speed increases compared to Golang
 - texture mapping
 
 Directory structure:
 - "go" has the code and data files
 - "videos" has some videos of the tracer in action (few of earlier stages before pushing to GitHub)
 - "screenshots" has some still screen shots, including interesting looking clitches that occurred during development
+- "c++" experimental port to C++, made with VS2019, uses SDL2 library for a graphical window
 
 There is also a few higher quality sample videos outside GitHub, that were not rendered in real-time:
 - https://youtu.be/D9EQBfdgmTY

@@ -8,14 +8,15 @@
 // This C++ version is about 10x faster (per thread) than the original Golang version.
 // Maybe the math functions or std::vector is much faster then Golang versions?
 //
+// Windows threads are used as there was difficulty in getting pthreads-win32 and
+// SDL_threads working. It should be easy to add #ifdefs for pthreads for compatibility.
+//
 // TODO: This version uses std::vector and leaks a bit of memory, might be faster if
 // we start using normal static size tables, would also fix the leak somewhere.
 //
-// TODO2: This version does not yet do threading. SDL_Threads could be tried as first choice.
+// * NOTE * Use only x64 Release profile when building, because Debug is unuseably swow!
 //
-// WARNING: Use only x64 Release profile when building, because Debug is insanely slower (unuseable.)
-//
-// NOTE: Uses only SDL2 as an external reference (nuget package), to draw graphics on a window.
+// Uses only SDL2 as an external reference (a nuget package), to draw graphics on a window.
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -24,6 +25,7 @@
 #include <string>
 #include <iostream>
 #include <fstream>
+#include <windows.h>
 
 using namespace std;
 
@@ -52,9 +54,9 @@ typedef struct {
 } Pixel;
 
 // Consts (adjustable)
-const int threads = 16;						// How many threads to use in parallel rendering
-const int width = 320;						// Render area width in pixels
-const int height = 240;						// Render area height in pixels
+#define THREADS 16							// How many threads to use in parallel rendering
+const int width = 160;						// Render area width in pixels
+const int height = 120;						// Render area height in pixels
 const tFloat contrastDiffuse = 0.05f;		// A multiplier to shading, to increase or decrease contrast of the overall image
 const tFloat contrastSpecular = 0.5f;		// A multiplier to shading, to increase or decrease contrast of the overall image
 const tFloat ambient = 0.0;					// Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
@@ -277,17 +279,39 @@ tFloat Limit(tFloat value) {
 }
 
 /// <summary>
-/// Render rows between y1 and y2 to an image
+/// Container for data passed for render thread (SDL thread)
 /// </summary>
-void Render(int y1, int y2, vector<Vertex> &vertexes, vector<Face> &faces, Vertex light) {
+typedef struct
+{
+	int y1;
+	int y2;
+	vector<Vertex> vertexes;
+	vector<Face> faces;
+	Vertex light;
+} RenderBag;
+
+/// <summary>
+/// Render rows between y1 and y2 to an image. Parameters passed as void* because this is SDL thread.
+/// </summary>
+//static SDL_ThreadFunction Render(void *data) {
+//void *Render(void* data) {
+DWORD WINAPI Render(LPVOID lpParameter) {
+	// Unpack parameters
+	RenderBag* bag = (RenderBag*)lpParameter;
+	int y1 = bag->y1;
+	int y2 = bag->y2;
+	vector<Vertex>& vertexes = bag->vertexes;
+	vector<Face>& faces = bag->faces;
+	Vertex light = bag->light;
 	
+	// Array of pixels where to render to (32bpp RGBA)
 	Uint32* pixels = (Uint32*)screenSurface->pixels;
 
 	for (tFloat y = (tFloat)y1; y < (tFloat)y2; y++) {
 		for (tFloat x = 0; x < width; x++) {
 
 			// Background is a gradient
-			pixels[((int)y * screenSurface->w + (int)x)] = (Uint32)(y / height * 64) << 16;
+			pixels[((int)y * screenSurface->w + (int)x)] = (Uint32)(y / height * 64);
 			
 			// Angle of the camera ray. They open up outwards from a single 3d-vertex (0,0,0) at the center of the image, which creates illusion of perspective.
 			// Also convert FOV in degrees to radians
@@ -327,9 +351,9 @@ void Render(int y1, int y2, vector<Vertex> &vertexes, vector<Face> &faces, Verte
 						tFloat layc = -atan2((vertexes.begin() + f->c)->y - light.y, (vertexes.begin() + f->c)->z - light.z);
 
 						// Average one brightness factor from the two angle pairs per vertex
-						tFloat laa = sqrt(pow(laxa, 2) + pow(laya, 2));
-						tFloat lab = sqrt(pow(laxb, 2) + pow(layb, 2));
-						tFloat lac = sqrt(pow(laxc, 2) + pow(layc, 2));
+						tFloat laa = sqrt(pow(laxa, 2.0f) + pow(laya, 2.0f));
+						tFloat lab = sqrt(pow(laxb, 2.0f) + pow(layb, 2.0f));
+						tFloat lac = sqrt(pow(laxc, 2.0f) + pow(layc, 2.0f));
 
 						// Calculate colour for each vertex for gouraud shading, taking into account angle to light source and diffuse contrast
 						tFloat ra = (vertexes.begin() + f->a)->r / laa * light.r * contrastDiffuse;
@@ -345,9 +369,9 @@ void Render(int y1, int y2, vector<Vertex> &vertexes, vector<Face> &faces, Verte
 						tFloat bc = (vertexes.begin() + f->c)->b / lac * light.b * contrastDiffuse;
 
 						// Distance along surface from vertexes to where the camera ray hit the surface
-						tFloat da = sqrt(pow(laxa - cax, 2) + pow(laya - cay, 2)) / contrastSpecular;
-						tFloat db = sqrt(pow(laxb - cax, 2) + pow(layb - cay, 2)) / contrastSpecular;
-						tFloat dc = sqrt(pow(laxc - cax, 2) + pow(layc - cay, 2)) / contrastSpecular;
+						tFloat da = sqrt(pow(laxa - cax, 2.0f) + pow(laya - cay, 2.0f)) / contrastSpecular;
+						tFloat db = sqrt(pow(laxb - cax, 2.0f) + pow(layb - cay, 2.0f)) / contrastSpecular;
+						tFloat dc = sqrt(pow(laxc - cax, 2.0f) + pow(layc - cay, 2.0f)) / contrastSpecular;
 
 						// Let color be determined by each corner of polygon and how far the camera ray is from those corners
 						// Also apply ambient light level
@@ -368,13 +392,20 @@ void Render(int y1, int y2, vector<Vertex> &vertexes, vector<Face> &faces, Verte
 				pixels[((int)y * screenSurface->w + (int)x)] = ((Uint32)(foremostPixel.r * 255) << 16) | ((Uint32)(foremostPixel.g * 255) << 8) | (Uint32)(foremostPixel.b * 255);
 			}
 		}
-		SDL_UpdateWindowSurface(window); // Update window for each row to show thread process independently
+		//SDL_UpdateWindowSurface(window); // Update window for each row to show thread process independently
 	}
+	
+	return 0;
 }
 
 // Engine thread, which keeps animating and rendering the scene, updating the frames to window
-void Engine(vector<Vertex> &vertexes, vector<Face> &faces) {
+void Engine(vector<Vertex>& vertexes, vector<Face>& faces) {
 	tFloat frame = 0;
+	//pthread_t threads[THREADS];
+	//SDL_Thread *threads[THREADS];
+	HANDLE threads[THREADS];
+	RenderBag bags[THREADS];
+	int ret;
 
 	for (;;) {
 		printf("Frame %.0f", frame / speed);
@@ -393,22 +424,49 @@ void Engine(vector<Vertex> &vertexes, vector<Face> &faces) {
 
 		// Light sources location and color is also animated
 		Vertex light;
-		light.x = sin(frame / 10) * 160;
-		light.y = sin(frame / 7) * 160;
-		light.z = -500;
-		light.r = (sin(frame / 3) + M_PI) / (M_PI * 2);
-		light.g = (sin(frame / 10) + M_PI) / (M_PI * 2);
-		light.b = (sin(frame / 5) + M_PI) / (M_PI * 2);
+		light.x = sin(frame / 10.0f) * 160.0f;
+		light.y = sin(frame / 7.0f) * 160.0f;
+		light.z = -500.0f;
+		light.r = (sin(frame / 3.0f) + (tFloat)M_PI) / ((tFloat)M_PI * 2.0f);
+		light.g = (sin(frame / 10.0f) + (tFloat)M_PI) / ((tFloat)M_PI * 2.0f);
+		light.b = (sin(frame / 5.0f) + (tFloat)M_PI) / ((tFloat)M_PI * 2.0f);
 		light.xa = 0;
 		light.ya = 0;
 
 		// Render in threads, dividing the image vertically to partitions. Big speed up with multi core processors.
 		Uint32 start = SDL_GetTicks(); // Begin taking time
-		for (int t = 0; t < threads; t++) {
-			int y1 = height / threads * t;
-			int y2 = height / threads * (t + 1);
-			Render(y1, y2, transformed, faces, light);
+		for (int t = 0; t < THREADS; t++) {
+			int y1 = height / THREADS * t;
+			int y2 = height / THREADS * (t + 1);
+
+			bags[t].y1 = y1;
+			bags[t].y2 = y2;
+			bags[t].vertexes = transformed;
+			bags[t].faces = faces;
+			bags[t].light = light;
+
+			string threadName = "Render" + to_string(t);
+
+			//ret = pthread_create(&threads[t], NULL, Render, &bags[t]);
+			//threads[t] = SDL_CreateThread(Render((void*)NULL)/*(bags[t])*/, threadName.c_str(), (void*)NULL);
+			DWORD myThreadID;
+			threads[t] = CreateThread(0, 0, Render, &bags[t], 0, &myThreadID);
+			/*if (ret == NULL) {
+				cout << "Can't create thread!" << endl;
+				return;
+			}*/
 		}
+		for (int t = 0; t < THREADS; t++) {
+			//ret = pthread_join(threads[t], NULL);
+			/*SDL_WaitThread(threads[t], &ret);
+			if (ret == NULL) {
+				cout << "Can't join thread!" << endl;
+				return;
+			}*/
+			WaitForSingleObject(threads[t], 1000);
+			CloseHandle(threads[t]);
+		}
+		//SDL_Delay(500);
 		Uint32 duration = SDL_GetTicks() - start; // End taking time
 		cout << " in " << duration << "ms." << endl;
 

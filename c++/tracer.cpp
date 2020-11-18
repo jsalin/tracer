@@ -8,10 +8,10 @@
 // This C++ version is about 10x faster (per thread) than the original Golang version.
 // Maybe the math functions or std::vector is much faster then Golang versions?
 //
-// Windows threads are used as there was difficulty in getting pthreads-win32 and
-// SDL_threads working. It should be easy to add #ifdefs for pthreads for compatibility.
+// Windows threads are used as there was difficulty in getting either pthreads-win32 or
+// SDL_threads working. There is an experimental #ifdef for trying out pthreads.
 //
-// * NOTE * Use only x64 Release profile when building, because Debug is unuseably swow!
+// * NOTE * Use only x64 Release profile when building, because Debug is unuseably slow!
 //
 // Uses only SDL2 as an external reference (a nuget package), to draw graphics on a window.
 //
@@ -26,7 +26,10 @@
 
 using namespace std;
 
-typedef float tFloat;  // Choose data type we use for floating points (double, float, ...)
+/// <summary>
+/// Choose data type we use for floating points (double, float, ...)
+/// </summary>
+typedef float tFloat;
 
 /// <summary>
 /// Vertex structure
@@ -67,20 +70,21 @@ typedef struct
 
 // Consts (adjustable)
 #define THREADS 16							// How many threads to use in parallel rendering
+#undef USE_PTHREADS							// Define on POSIX threads system, undefine on Windows
+#undef SHOW_PROGRESS						// Define to show each row instantly as it gets rendered
 const int width = 640;						// Render area width in pixels
 const int height = 480;						// Render area height in pixels
 const tFloat contrastDiffuse = 0.05f;		// A multiplier to shading, to increase or decrease contrast of the overall image
 const tFloat contrastSpecular = 0.5f;		// A multiplier to shading, to increase or decrease contrast of the overall image
 const tFloat ambient = 0.0;					// Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
 const tFloat fov = 90.0;					// Field of vision (in degrees)
-const char* filename = "../go/duck2.stl";   // File to load (the 3d mesh)
-const tFloat filescale = 0.07f;				// Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
-const tFloat speed = 1.0;					// Speed multiplier for animation
+const char* filename = "../go/ball.stl";    // File to load (the 3d mesh)
+const tFloat filescale = 100.0f;			// Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
+const tFloat speed = 0.25;					// Speed multiplier for animation
 
 // Globals
 SDL_Window* window = NULL;
 SDL_Surface* screenSurface = NULL;
-
 
 /// <summary>
 /// FindVertex returns index of a vertex in a list by coordinates
@@ -297,13 +301,15 @@ typedef struct
 } RenderBag;
 
 /// <summary>
-/// Render rows between y1 and y2 to an image. Parameters passed as void* because this is SDL thread.
+/// Render rows between y1 and y2 to an image. Parameters passed as void* because this is a thread.
 /// </summary>
-//static SDL_ThreadFunction Render(void *data) {
-//void *Render(void* data) {
-DWORD WINAPI Render(LPVOID lpParameter) {
+#ifdef USE_PTHREADS
+void *Render(void* data) {
+#else
+DWORD WINAPI Render(LPVOID data) {
+#endif
 	// Unpack parameters
-	RenderBag* bag = (RenderBag*)lpParameter;
+	RenderBag* bag = (RenderBag*)data;
 	int y1 = bag->y1;
 	int y2 = bag->y2;
 	Mesh *mesh = &(bag->mesh);
@@ -316,19 +322,17 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 		for (tFloat x = 0; x < width; x++) {
 
 			// Background is a gradient
-			pixels[((int)y * screenSurface->w + (int)x)] = (Uint32)(y / height * 64);
+			//pixels[((int)y * screenSurface->w + (int)x)] = (Uint32)(y / height * 64);
+			Pixel foremostPixel;
+			foremostPixel.r = 0;
+			foremostPixel.g = 0;
+			foremostPixel.b = y / height / 4;
+			foremostPixel.depth = 10000;
 			
 			// Angle of the camera ray. They open up outwards from a single 3d-vertex (0,0,0) at the center of the image, which creates illusion of perspective.
 			// Also convert FOV in degrees to radians
 			tFloat cax = (x - width / 2) * fov * 0.01745329f / height;
-			tFloat cay = (y - height / 2) * fov * 0.01745329f / height;
-
-			Pixel foremostPixel;
-			foremostPixel.r = 0;
-			foremostPixel.g = 0;
-			foremostPixel.b = 0;
-			foremostPixel.depth = 0;
-			bool pixelFound = false;
+			tFloat cay = (y - height / 2) * fov * 0.01745329f / height;			
 
 			// Loop through every face in the scene, or mesh
 			for (int f = 0; f < mesh->fCount; f++) {
@@ -345,7 +349,7 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 					// Calculate at with depth the polygon we just hit is at (for depth sorting, as we might hit more polygons at different depths with the same camera ray)
 					tFloat avgdepth = (mesh->v[mesh->f[f].a].z + mesh->v[mesh->f[f].b].z + mesh->v[mesh->f[f].c].z) / 3;
 
-					if ((!pixelFound) || (avgdepth < foremostPixel.depth)) {
+					if (avgdepth < foremostPixel.depth) {
 
 						// Calculate angle between the omni light source and the polygon
 						tFloat laxa = -atan2(mesh->v[mesh->f[f].a].x - light.x, mesh->v[mesh->f[f].a].z - light.z);
@@ -386,18 +390,17 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 
 						// Keep color below 1.0 to avoid clitches when going overbright
 						foremostPixel = Pixel{ avgdepth, Limit(r), Limit(g), Limit(b) };
-						pixelFound = true;
-						
 					}
 				}
 			}
 
 			// We have now determined the foremost face that hit the camera ray, and therefore the color of the pixel, if not background
-			if (pixelFound) {
-				pixels[((int)y * screenSurface->w + (int)x)] = ((Uint32)(foremostPixel.r * 255) << 16) | ((Uint32)(foremostPixel.g * 255) << 8) | (Uint32)(foremostPixel.b * 255);
-			}
+			// Convert color from three 0.0 to 1.0 values into 32-bit RGBA
+			pixels[((int)y * screenSurface->w + (int)x)] = ((Uint32)(foremostPixel.r * 255) << 16) | ((Uint32)(foremostPixel.g * 255) << 8) | (Uint32)(foremostPixel.b * 255);
 		}
-		//SDL_UpdateWindowSurface(window); // Update window for each row to show thread process independently
+#ifdef SHOWPROGRESS
+		SDL_UpdateWindowSurface(window); // Update window for each row to show thread process independently
+#endif
 	}
 	
 	return 0;
@@ -406,12 +409,16 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 // Engine thread, which keeps animating and rendering the scene, updating the frames to window
 void Engine(Mesh &mesh) {
 	tFloat frame = 0;
-	//pthread_t threads[THREADS];
-	HANDLE threads[THREADS];
-	RenderBag bags[THREADS];
-	int ret;
-	DWORD myThreadID;
 
+#ifdef USE_PTHREADS
+	pthread_t threads[THREADS];
+#else
+	HANDLE threads[THREADS];
+#endif
+
+	RenderBag bags[THREADS];
+
+	Uint32 engineStart = SDL_GetTicks();
 	for (;;) {
 		printf("Frame %.0f", frame / speed);
 
@@ -439,7 +446,7 @@ void Engine(Mesh &mesh) {
 		light.ya = 0;
 
 		// Render in threads, dividing the image vertically to partitions. Big speed up with multi core processors.
-		Uint32 start = SDL_GetTicks(); // Begin taking time
+		Uint32 frameStart = SDL_GetTicks(); // Begin taking time
 		for (int t = 0; t < THREADS; t++) {
 			int y1 = height / THREADS * t;
 			int y2 = height / THREADS * (t + 1);
@@ -451,21 +458,37 @@ void Engine(Mesh &mesh) {
 
 			string threadName = "Render" + to_string(t);
 
-			//ret = pthread_create(&threads[t], NULL, Render, &bags[t]);
+#ifdef USE_PTHREADS
+			int ret = pthread_create(&threads[t], NULL, Render, &bags[t]);
+#else
+			DWORD myThreadID;
 			threads[t] = CreateThread(0, 0, Render, &bags[t], 0, &myThreadID);
+#endif
 		}
 		for (int t = 0; t < THREADS; t++) {
-			//ret = pthread_join(threads[t], NULL);
+#ifdef USE_PTHREADS
+			int ret = pthread_join(threads[t], NULL);
+#else
 			WaitForSingleObject(threads[t], 1000);
 			CloseHandle(threads[t]);
+#endif
 		}
-		Uint32 duration = SDL_GetTicks() - start; // End taking time
-		cout << " in " << duration << "ms." << endl;
+		Uint32 frameDuration = SDL_GetTicks() - frameStart; // End taking time
+		tFloat avgFPS = (frame / speed) / (SDL_GetTicks() - engineStart) * 1000;
+		printf(" in %d ms. FPS: %.2f\n", frameDuration, avgFPS);
 
 		// Copy the rendered image on the window
 		SDL_UpdateWindowSurface(window);
 
 		frame += speed;
+
+		// Handle SDL events
+		SDL_Event input;
+		while (SDL_PollEvent(&input) > 0)
+		{
+			// Exit at quit request or a key press
+			if ((input.type == SDL_QUIT) || (input.type == SDL_KEYDOWN)) return;
+		}
 	}
 }
 
@@ -491,7 +514,8 @@ int main(int argc, char* args[])
     }
     else
     {
-        window = SDL_CreateWindow("Tracer", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, SDL_WINDOW_SHOWN);
+		string title = "Tracer (" + to_string(width) + "x" + to_string(height) + ", " + filename + ")";
+        window = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, SDL_WINDOW_SHOWN);
         if (window == NULL)
         {
             printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());

@@ -60,13 +60,19 @@ typedef struct {
 /// <summary>
 /// Mesh structure, which holds all vertex and face data
 /// </summary>
-typedef struct
+class Mesh
 {
-	Face f[1000];
-	Vertex v[1000];
+public:
+	Face *f;
+	Vertex *v;
 	int fCount;
 	int vCount;
-} Mesh;
+
+	~Mesh() {
+		delete f;
+		delete v;
+	}
+};
 
 // Consts (adjustable)
 #define THREADS 16							// How many threads to use in parallel rendering
@@ -81,6 +87,8 @@ const tFloat fov = 90.0;					// Field of vision (in degrees)
 const char* filename = "../go/ball.stl";    // File to load (the 3d mesh)
 const tFloat filescale = 100.0f;			// Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
 const tFloat speed = 0.25;					// Speed multiplier for animation
+#define MAX_VERTEXES 10000					// Maximum number of vertexes per mesh
+#define MAX_FACES 10000						// Maximum number of faces per mesh
 
 // Globals
 SDL_Window* window = NULL;
@@ -113,11 +121,13 @@ bool LoadSTL(string filename, Mesh &mesh)
 	mesh.vCount = 0;
 	mesh.fCount = 0;
 	vector<int> vertexIndexes;
+	mesh.v = new Vertex[MAX_VERTEXES];
+	mesh.f = new Face[MAX_FACES];
 
 	// Load the lines from file to a string array
 	ifstream file(filename);
 	if (!file) {
-		cout << "Could not open STL file " << filename << endl;
+		printf("Could not open STL file '%s'!\n", filename.c_str());
 		return false;
 	}
 
@@ -173,12 +183,12 @@ bool LoadSTL(string filename, Mesh &mesh)
 			if (va >= 0) {
 				vertexIndexes.push_back(va);
 			} else {
-				cout << "Couldn't find vertex!" << endl;
+				printf("Couldn't find vertex!\n");
 			}
 		}
 	}
 	
-	for (unsigned int i = 0; i < vertexIndexes.size() / 3; i++) {		
+	for (size_t i = 0; i < vertexIndexes.size() / 3; i++) {
 		// Add face
 		mesh.f[mesh.fCount].a = vertexIndexes[i * 3];
 		mesh.f[mesh.fCount].b = vertexIndexes[i * 3 + 1];
@@ -187,7 +197,7 @@ bool LoadSTL(string filename, Mesh &mesh)
 	}
 
 	// Report
-	cout << "Read " << mesh.vCount << " unique vertexes in " << mesh.fCount << " faces." << std::endl;
+	printf("Read %i unique vertexes in %i faces.\n", mesh.vCount, mesh.fCount);
 	printf("Mesh dimensions: X: %.2f to %.2f, Y: %.2f to %.2f, Z: %.2f to %.2f\n", xmin, xmax, ymin, ymax, zmin, zmax);
 
 	return true;
@@ -252,16 +262,22 @@ void ScaleVertexes(tFloat x, tFloat y, tFloat z, Mesh &mesh) {
 /// <summary>
 /// CopyVertexes makes a copy of a mesh
 /// </summary>
-void CopyMesh(Mesh &source, Mesh &target) {
-	memcpy(&target, &source, sizeof(source));
+void CopyMesh(const Mesh &source, Mesh &target) {
+	// Can't use simple memcpy because of pointers
+	target.vCount = source.vCount;
+	target.fCount = source.fCount;
+	target.v = new Vertex[source.vCount/* MAX_VERTEXES */];
+	target.f = new Face[source.fCount/* MAX_FACES */];
+	for (int i = 0; i < source.vCount; i++) target.v[i] = source.v[i];
+	for (int i = 0; i < source.fCount; i++) target.f[i] = source.f[i];
 }
 
 /// <summary>
 /// InsidePolygon checks if coordinates (a,b) are inside or outside a 2D polygon defined by a list of coordinates
 /// </summary>
-bool InsidePolygon(tFloat a, tFloat b, tFloat corners[3][2]) {
+inline bool InsidePolygon(tFloat a, tFloat b, tFloat corners[3][2]) {
 	bool inside = false;
-	int size = 3;
+	const int size = 3;
 
 	// Go through every line of the polygon
 	int j = size - 1;
@@ -327,7 +343,7 @@ DWORD WINAPI Render(LPVOID data) {
 			foremostPixel.r = 0;
 			foremostPixel.g = 0;
 			foremostPixel.b = y / height / 4;
-			foremostPixel.depth = 10000;
+			foremostPixel.depth = 100000.0f;
 			
 			// Angle of the camera ray. They open up outwards from a single 3d-vertex (0,0,0) at the center of the image, which creates illusion of perspective.
 			// Also convert FOV in degrees to radians
@@ -407,7 +423,7 @@ DWORD WINAPI Render(LPVOID data) {
 }
 
 // Engine thread, which keeps animating and rendering the scene, updating the frames to window
-void Engine(Mesh &mesh) {
+void Engine(const Mesh &mesh) {
 	tFloat frame = 0;
 
 #ifdef USE_PTHREADS
@@ -463,14 +479,20 @@ void Engine(Mesh &mesh) {
 #else
 			DWORD myThreadID;
 			threads[t] = CreateThread(0, 0, Render, &bags[t], 0, &myThreadID);
+			if (threads[t] == NULL) {
+				printf("Could not create a thread!\n");
+			}
 #endif
 		}
+
 		for (int t = 0; t < THREADS; t++) {
 #ifdef USE_PTHREADS
 			int ret = pthread_join(threads[t], NULL);
 #else
-			WaitForSingleObject(threads[t], 1000);
-			CloseHandle(threads[t]);
+			if (threads[t] != NULL) {
+				WaitForSingleObject(threads[t], INFINITE);
+				CloseHandle(threads[t]);
+			}
 #endif
 		}
 		Uint32 frameDuration = SDL_GetTicks() - frameStart; // End taking time

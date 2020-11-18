@@ -11,9 +11,6 @@
 // Windows threads are used as there was difficulty in getting pthreads-win32 and
 // SDL_threads working. It should be easy to add #ifdefs for pthreads for compatibility.
 //
-// TODO: This version uses std::vector and leaks a bit of memory, might be faster if
-// we start using normal static size tables, would also fix the leak somewhere.
-//
 // * NOTE * Use only x64 Release profile when building, because Debug is unuseably swow!
 //
 // Uses only SDL2 as an external reference (a nuget package), to draw graphics on a window.
@@ -41,22 +38,37 @@ typedef struct
     tFloat xa, ya;      // Speed up, store pre-calculated angles to camera vertex for each vertex (once before frame)
 } Vertex;
 
-// Face structure
+/// <summary>
+/// Face structure
+/// </summary>
 typedef struct
 {
     int a, b, c;        // Index of each vertex of polygon
 } Face;
 
-// Pixel structure
+/// <summary>
+/// Pixel structure
+/// </summary>
 typedef struct {
     tFloat depth;       // Depth the color was calculated from
     tFloat r, g, b;     // Color
 } Pixel;
 
+/// <summary>
+/// Mesh structure, which holds all vertex and face data
+/// </summary>
+typedef struct
+{
+	Face f[1000];
+	Vertex v[1000];
+	int fCount;
+	int vCount;
+} Mesh;
+
 // Consts (adjustable)
 #define THREADS 16							// How many threads to use in parallel rendering
-const int width = 160;						// Render area width in pixels
-const int height = 120;						// Render area height in pixels
+const int width = 640;						// Render area width in pixels
+const int height = 480;						// Render area height in pixels
 const tFloat contrastDiffuse = 0.05f;		// A multiplier to shading, to increase or decrease contrast of the overall image
 const tFloat contrastSpecular = 0.5f;		// A multiplier to shading, to increase or decrease contrast of the overall image
 const tFloat ambient = 0.0;					// Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
@@ -73,11 +85,9 @@ SDL_Surface* screenSurface = NULL;
 /// <summary>
 /// FindVertex returns index of a vertex in a list by coordinates
 /// </summary>
-int FindVertex(tFloat x, tFloat y, tFloat z, vector<Vertex>& vertexes) {
-	int index = 0;
-	for (vector<Vertex>::iterator i = vertexes.begin(); i != vertexes.end(); ++i) {
-		if ((i->x == x) && (i->y == y) && (i->z == z)) return index;
-		index++;
+int FindVertex(tFloat x, tFloat y, tFloat z, Mesh &mesh) {
+	for (int i = 0; i < mesh.vCount; i++) {
+		if ((mesh.v[i].x == x) && (mesh.v[i].y == y) && (mesh.v[i].z == z)) return i;
 	}
 	return -1;
 }
@@ -85,7 +95,7 @@ int FindVertex(tFloat x, tFloat y, tFloat z, vector<Vertex>& vertexes) {
 /// <summary>
 /// LoadSTL loads ascii STL file. Works with a single mesh with three vertex faces only.
 /// </summary>
-bool LoadSTL(string filename, vector<Vertex> &vertexes, vector<Face> &faces)
+bool LoadSTL(string filename, Mesh &mesh)
 {
 	tFloat xmin = 0;
 	tFloat ymin = 0;
@@ -96,8 +106,8 @@ bool LoadSTL(string filename, vector<Vertex> &vertexes, vector<Face> &faces)
 	float x, y, z;
 
 	// Initialize empty lists for vertexes and faces
-	//vertexes = new vector<Vertex>;
-	//faces = new vector<Face>;
+	mesh.vCount = 0;
+	mesh.fCount = 0;
 	vector<int> vertexIndexes;
 
 	// Load the lines from file to a string array
@@ -130,23 +140,23 @@ bool LoadSTL(string filename, vector<Vertex> &vertexes, vector<Face> &faces)
 			if (z > zmax) zmax = z;
 
 			bool duplicate = false;
-			for (vector<Vertex>::iterator j = vertexes.begin(); j != vertexes.end(); ++j)
+			for (int j = 0; j < mesh.vCount; j++)
 			{
-				if ((j->x == x) && (j->y == y) && (j->z == z)) duplicate = true;
+				if ((mesh.v[j].x == x) && (mesh.v[j].y == y) && (mesh.v[j].z == z)) duplicate = true;
 			}
 
 			if (!duplicate) {
-				Vertex* newVertex = new Vertex;
-				newVertex->x = x;
-				newVertex->y = y;
-				newVertex->z = z;
-				newVertex->xa = 0;
-				newVertex->ya = 0;
+				// Not duplicate - add the vertex
+				mesh.v[mesh.vCount].x = x;
+				mesh.v[mesh.vCount].y = y;
+				mesh.v[mesh.vCount].z = z;
+				mesh.v[mesh.vCount].xa = 0;
+				mesh.v[mesh.vCount].ya = 0;
 				// Apply some color as the file has none
-				newVertex->r = 1.0;
-				newVertex->g = 1.0;
-				newVertex->b = 1.0;
-				vertexes.push_back(*newVertex);
+				mesh.v[mesh.vCount].r = 1.0;
+				mesh.v[mesh.vCount].g = 1.0;
+				mesh.v[mesh.vCount].b = 1.0;
+				mesh.vCount++;
 			}
 		}
 	}
@@ -155,7 +165,7 @@ bool LoadSTL(string filename, vector<Vertex> &vertexes, vector<Face> &faces)
 	for (vector<string>::iterator i = lines.begin(); i != lines.end(); ++i)	{
 		int n = sscanf_s(i->c_str(), "vertex %f %f %f\n", &x, &y, &z);
 		if (n == 3) {
-			int va = FindVertex(x, y, z, vertexes);
+			int va = FindVertex(x, y, z, mesh);
 			if (va >= 0) {
 				vertexIndexes.push_back(va);
 			} else {
@@ -164,16 +174,16 @@ bool LoadSTL(string filename, vector<Vertex> &vertexes, vector<Face> &faces)
 		}
 	}
 	
-	for (unsigned int i = 0; i < vertexIndexes.size() / 3; i++) {
-		Face* newFace = new Face;
-		newFace->a = vertexIndexes[i * 3];
-		newFace->b = vertexIndexes[i * 3 + 1];
-		newFace->c = vertexIndexes[i * 3 + 2];
-		faces.push_back(*newFace);
+	for (unsigned int i = 0; i < vertexIndexes.size() / 3; i++) {		
+		// Add face
+		mesh.f[mesh.fCount].a = vertexIndexes[i * 3];
+		mesh.f[mesh.fCount].b = vertexIndexes[i * 3 + 1];
+		mesh.f[mesh.fCount].c = vertexIndexes[i * 3 + 2];
+		mesh.fCount++;
 	}
 
 	// Report
-	cout << "Read " << vertexes.size() << " unique vertexes in " << faces.size() << " faces." << std::endl;
+	cout << "Read " << mesh.vCount << " unique vertexes in " << mesh.fCount << " faces." << std::endl;
 	printf("Mesh dimensions: X: %.2f to %.2f, Y: %.2f to %.2f, Z: %.2f to %.2f\n", xmin, xmax, ymin, ymax, zmin, zmax);
 
 	return true;
@@ -182,24 +192,24 @@ bool LoadSTL(string filename, vector<Vertex> &vertexes, vector<Face> &faces)
 /// <summary>
 /// MoveVertexes moves vertexes around in space by (x,y,z) offset
 /// </summary>
-void MoveVertexes(tFloat x, tFloat y, tFloat z, vector<Vertex> &vertexes) {
-	for (vector<Vertex>::iterator i = vertexes.begin(); i != vertexes.end(); ++i) {
-		i->x += x;
-		i->y += y;
-		i->z += z;
+void MoveVertexes(tFloat x, tFloat y, tFloat z, Mesh &mesh) {
+	for (int i = 0; i < mesh.vCount; i++) {
+		mesh.v[i].x += x;
+		mesh.v[i].y += y;
+		mesh.v[i].z += z;
 	}
 }
 
 /// <summary>
 /// RotateVertexes rotates vertexes by angle specified for each axis in radians
 /// </summary>
-void RotateVertexes(tFloat xa, tFloat ya, tFloat za, vector<Vertex>& vertexes) {
+void RotateVertexes(tFloat xa, tFloat ya, tFloat za, Mesh &mesh) {
 
 	// Rotate each vertex with help of a rotation matrix
-	for (vector<Vertex>::iterator i = vertexes.begin(); i != vertexes.end(); ++i) {
-		tFloat x = i->x;
-		tFloat y = i->y;
-		tFloat z = i->z;
+	for (int i = 0; i < mesh.vCount; i++) {
+		tFloat x = mesh.v[i].x;
+		tFloat y = mesh.v[i].y;
+		tFloat z = mesh.v[i].z;
 
 		// x angle
 		tFloat tx = x;
@@ -218,31 +228,28 @@ void RotateVertexes(tFloat xa, tFloat ya, tFloat za, vector<Vertex>& vertexes) {
 		tx = tx2;
 		tz = tz2;
 
-		i->x = tx;
-		i->y = ty;
-		i->z = tz;
+		mesh.v[i].x = tx;
+		mesh.v[i].y = ty;
+		mesh.v[i].z = tz;
 	}
 }
 
 /// <summary>
 /// ScaleVertexes scales size of a mesh by a factor for each axis
 /// </summary>
-void ScaleVertexes(tFloat x, tFloat y, tFloat z, vector<Vertex>& vertexes) {
-	for (vector<Vertex>::iterator i = vertexes.begin(); i != vertexes.end(); ++i) {
-		i->x *= x;
-		i->y *= y;
-		i->z *= z;
+void ScaleVertexes(tFloat x, tFloat y, tFloat z, Mesh &mesh) {
+	for (int i = 0; i < mesh.vCount; i++) {
+		mesh.v[i].x *= x;
+		mesh.v[i].y *= y;
+		mesh.v[i].z *= z;
 	}
 }
 
 /// <summary>
-/// CopyVertexes makes a copy of a vertex array (to manipulate data while keeping the original in memory)
+/// CopyVertexes makes a copy of a mesh
 /// </summary>
-void CopyVertexes(vector<Vertex>& source, vector<Vertex>& target) {
-	for (vector<Vertex>::iterator i = source.begin(); i != source.end(); ++i) {
-		Vertex *newVertex = new Vertex(*i);
-		target.push_back(*newVertex);
-	}
+void CopyMesh(Mesh &source, Mesh &target) {
+	memcpy(&target, &source, sizeof(source));
 }
 
 /// <summary>
@@ -285,8 +292,7 @@ typedef struct
 {
 	int y1;
 	int y2;
-	vector<Vertex> vertexes;
-	vector<Face> faces;
+	Mesh mesh;
 	Vertex light;
 } RenderBag;
 
@@ -300,8 +306,7 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 	RenderBag* bag = (RenderBag*)lpParameter;
 	int y1 = bag->y1;
 	int y2 = bag->y2;
-	vector<Vertex>& vertexes = bag->vertexes;
-	vector<Face>& faces = bag->faces;
+	Mesh *mesh = &(bag->mesh);
 	Vertex light = bag->light;
 	
 	// Array of pixels where to render to (32bpp RGBA)
@@ -326,29 +331,29 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 			bool pixelFound = false;
 
 			// Loop through every face in the scene, or mesh
-			for (vector<Face>::iterator f = faces.begin(); f != faces.end(); ++f) {
+			for (int f = 0; f < mesh->fCount; f++) {
 
 				// If the camera ray is within a 2D polygon formed by the angles of the 3D polygon towards the camera (0,0,0), we found a pixel to fill with some color (not background)
 				tFloat polygonPoints[3][2] = {
-					{(vertexes.begin() + f->a)->xa, (vertexes.begin() + f->a)->ya},
-					{(vertexes.begin() + f->b)->xa, (vertexes.begin() + f->b)->ya},
-					{(vertexes.begin() + f->c)->xa, (vertexes.begin() + f->c)->ya}
+					{mesh->v[mesh->f[f].a].xa, mesh->v[mesh->f[f].a].ya},
+					{mesh->v[mesh->f[f].b].xa, mesh->v[mesh->f[f].b].ya},
+					{mesh->v[mesh->f[f].c].xa, mesh->v[mesh->f[f].c].ya}
 				};
 				
 				if (InsidePolygon(cax, cay, polygonPoints)) {
 
 					// Calculate at with depth the polygon we just hit is at (for depth sorting, as we might hit more polygons at different depths with the same camera ray)
-					tFloat avgdepth = ((vertexes.begin() + f->a)->z + (vertexes.begin() + f->b)->z + (vertexes.begin() + f->c)->z) / 3;
+					tFloat avgdepth = (mesh->v[mesh->f[f].a].z + mesh->v[mesh->f[f].b].z + mesh->v[mesh->f[f].c].z) / 3;
 
 					if ((!pixelFound) || (avgdepth < foremostPixel.depth)) {
 
 						// Calculate angle between the omni light source and the polygon
-						tFloat laxa = -atan2((vertexes.begin() + f->a)->x - light.x, (vertexes.begin() + f->a)->z - light.z);
-						tFloat laya = -atan2((vertexes.begin() + f->a)->y - light.y, (vertexes.begin() + f->a)->z - light.z);
-						tFloat laxb = -atan2((vertexes.begin() + f->b)->x - light.x, (vertexes.begin() + f->b)->z - light.z);
-						tFloat layb = -atan2((vertexes.begin() + f->b)->y - light.y, (vertexes.begin() + f->b)->z - light.z);
-						tFloat laxc = -atan2((vertexes.begin() + f->c)->x - light.x, (vertexes.begin() + f->c)->z - light.z);
-						tFloat layc = -atan2((vertexes.begin() + f->c)->y - light.y, (vertexes.begin() + f->c)->z - light.z);
+						tFloat laxa = -atan2(mesh->v[mesh->f[f].a].x - light.x, mesh->v[mesh->f[f].a].z - light.z);
+						tFloat laya = -atan2(mesh->v[mesh->f[f].a].y - light.y, mesh->v[mesh->f[f].a].z - light.z);
+						tFloat laxb = -atan2(mesh->v[mesh->f[f].b].x - light.x, mesh->v[mesh->f[f].b].z - light.z);
+						tFloat layb = -atan2(mesh->v[mesh->f[f].b].y - light.y, mesh->v[mesh->f[f].b].z - light.z);
+						tFloat laxc = -atan2(mesh->v[mesh->f[f].c].x - light.x, mesh->v[mesh->f[f].c].z - light.z);
+						tFloat layc = -atan2(mesh->v[mesh->f[f].c].y - light.y, mesh->v[mesh->f[f].c].z - light.z);
 
 						// Average one brightness factor from the two angle pairs per vertex
 						tFloat laa = sqrt(pow(laxa, 2.0f) + pow(laya, 2.0f));
@@ -356,17 +361,17 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 						tFloat lac = sqrt(pow(laxc, 2.0f) + pow(layc, 2.0f));
 
 						// Calculate colour for each vertex for gouraud shading, taking into account angle to light source and diffuse contrast
-						tFloat ra = (vertexes.begin() + f->a)->r / laa * light.r * contrastDiffuse;
-						tFloat ga = (vertexes.begin() + f->a)->g / laa * light.g * contrastDiffuse;
-						tFloat ba = (vertexes.begin() + f->a)->b / laa * light.b * contrastDiffuse;
+						tFloat ra = mesh->v[mesh->f[f].a].r / laa * light.r * contrastDiffuse;
+						tFloat ga = mesh->v[mesh->f[f].a].g / laa * light.g * contrastDiffuse;
+						tFloat ba = mesh->v[mesh->f[f].a].b / laa * light.b * contrastDiffuse;
 
-						tFloat rb = (vertexes.begin() + f->b)->r / lab * light.r * contrastDiffuse;
-						tFloat gb = (vertexes.begin() + f->b)->g / lab * light.g * contrastDiffuse;
-						tFloat bb = (vertexes.begin() + f->b)->b / lab * light.b * contrastDiffuse;
+						tFloat rb = mesh->v[mesh->f[f].b].r / lab * light.r * contrastDiffuse;
+						tFloat gb = mesh->v[mesh->f[f].b].g / lab * light.g * contrastDiffuse;
+						tFloat bb = mesh->v[mesh->f[f].b].b / lab * light.b * contrastDiffuse;
 
-						tFloat rc = (vertexes.begin() + f->c)->r / lac * light.r * contrastDiffuse;
-						tFloat gc = (vertexes.begin() + f->c)->g / lac * light.g * contrastDiffuse;
-						tFloat bc = (vertexes.begin() + f->c)->b / lac * light.b * contrastDiffuse;
+						tFloat rc = mesh->v[mesh->f[f].c].r / lac * light.r * contrastDiffuse;
+						tFloat gc = mesh->v[mesh->f[f].c].g / lac * light.g * contrastDiffuse;
+						tFloat bc = mesh->v[mesh->f[f].c].b / lac * light.b * contrastDiffuse;
 
 						// Distance along surface from vertexes to where the camera ray hit the surface
 						tFloat da = sqrt(pow(laxa - cax, 2.0f) + pow(laya - cay, 2.0f)) / contrastSpecular;
@@ -399,27 +404,27 @@ DWORD WINAPI Render(LPVOID lpParameter) {
 }
 
 // Engine thread, which keeps animating and rendering the scene, updating the frames to window
-void Engine(vector<Vertex>& vertexes, vector<Face>& faces) {
+void Engine(Mesh &mesh) {
 	tFloat frame = 0;
 	//pthread_t threads[THREADS];
-	//SDL_Thread *threads[THREADS];
 	HANDLE threads[THREADS];
 	RenderBag bags[THREADS];
 	int ret;
+	DWORD myThreadID;
 
 	for (;;) {
 		printf("Frame %.0f", frame / speed);
 
 		// Transform vertexes to different position, angle etc. for each frame to archieve animation
-		vector<Vertex> transformed;
-		CopyVertexes(vertexes, transformed);
+		Mesh transformed;
+		CopyMesh(mesh, transformed);
 		RotateVertexes(frame / 20, frame / 25, frame / 30, transformed);
 		MoveVertexes(0, 0, 200 + sin(frame / 10) * 50, transformed);
 
 		// A pre-calculation per each frame that speeds up hugely, as two simple atan2's of each vertex are requested so often in rendering
-		for (vector<Vertex>::iterator i = transformed.begin(); i != transformed.end(); ++i) {
-			i->xa = atan2(i->x, i->z);
-			i->ya = atan2(i->y, i->z);
+		for (int i = 0; i < transformed.vCount; i++) {
+			transformed.v[i].xa = atan2(transformed.v[i].x, transformed.v[i].z);
+			transformed.v[i].ya = atan2(transformed.v[i].y, transformed.v[i].z);
 		}
 
 		// Light sources location and color is also animated
@@ -441,32 +446,19 @@ void Engine(vector<Vertex>& vertexes, vector<Face>& faces) {
 
 			bags[t].y1 = y1;
 			bags[t].y2 = y2;
-			bags[t].vertexes = transformed;
-			bags[t].faces = faces;
+			bags[t].mesh = transformed;
 			bags[t].light = light;
 
 			string threadName = "Render" + to_string(t);
 
 			//ret = pthread_create(&threads[t], NULL, Render, &bags[t]);
-			//threads[t] = SDL_CreateThread(Render((void*)NULL)/*(bags[t])*/, threadName.c_str(), (void*)NULL);
-			DWORD myThreadID;
 			threads[t] = CreateThread(0, 0, Render, &bags[t], 0, &myThreadID);
-			/*if (ret == NULL) {
-				cout << "Can't create thread!" << endl;
-				return;
-			}*/
 		}
 		for (int t = 0; t < THREADS; t++) {
 			//ret = pthread_join(threads[t], NULL);
-			/*SDL_WaitThread(threads[t], &ret);
-			if (ret == NULL) {
-				cout << "Can't join thread!" << endl;
-				return;
-			}*/
 			WaitForSingleObject(threads[t], 1000);
 			CloseHandle(threads[t]);
 		}
-		//SDL_Delay(500);
 		Uint32 duration = SDL_GetTicks() - start; // End taking time
 		cout << " in " << duration << "ms." << endl;
 
@@ -482,16 +474,15 @@ void Engine(vector<Vertex>& vertexes, vector<Face>& faces) {
 /// </summary>
 int main(int argc, char* args[])
 {
-	vector<Vertex> vertexes;
-	vector<Face> faces;
+	Mesh mesh;
 
 	// Load 3D mesh data
 	// ball.stl: X: -1.115109 to 1.115109, Y: -1.115109 to 1.115109, Z: -1.115109 to 1.115109, 144 vertexes in 284 faces.
 	// duck2.stl: X: -1144.435059 to 672.233276, Y: -2355.597900 to 1428.072998, Z: -1920.546021 to 339.157715, 268 vertexes in 516 faces.
-	if (!LoadSTL(filename, vertexes, faces)) {
+	if (!LoadSTL(filename, mesh)) {
 		return 0;
 	}
-	ScaleVertexes(filescale, filescale, filescale, vertexes);
+	ScaleVertexes(filescale, filescale, filescale, mesh);
 
 	// Initialize SDL to show graphics on window
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
@@ -510,7 +501,7 @@ int main(int argc, char* args[])
             screenSurface = SDL_GetWindowSurface(window);
 
 			// SDL initialization is a success, start main engine thread
-			Engine(vertexes, faces);
+			Engine(mesh);
         }
     }
 

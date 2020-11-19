@@ -36,12 +36,12 @@ const tFloat contrastDiffuse = 0.05f;		// A multiplier to shading, to increase o
 const tFloat contrastSpecular = 0.5f;		// A multiplier to shading, to increase or decrease contrast of the overall image
 const tFloat ambient = 0.0;					// Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
 const tFloat fov = 90.0;					// Field of vision (in degrees)
-const char* filename = "../go/ball.stl";    // File to load (the 3d mesh)
-const tFloat filescale = 100.0f;			// Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
+const char* filename = "../go/duck2.stl";   // File to load (the 3d mesh)
+const tFloat filescale = 0.07f;				// Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
 const tFloat speed = 0.25;					// Speed multiplier for animation
 
 // Include files
-#include <SDL2/SDL.h>
+#include <SDL.h>
 #include <vector>
 #include <string>
 #include <iostream>

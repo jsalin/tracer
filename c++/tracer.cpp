@@ -17,19 +17,47 @@
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-#include <SDL.h>
+
+
+// Choose data type we use for floating points (double, float, ...)
+typedef float tFloat;
+
+// Consts (adjustable)
+#undef USE_PTHREADS							// Define to use POSIX pthreads (Linux, BSD, ...)
+#undef USE_WINDOWS							// Define to use Windows threads (Only on Windows)
+#define USE_CPPTHREADS						// Define to use C++11 threads (Should work on every modern OS)
+#define THREADS 16							// How many threads to use in parallel rendering
+#undef SHOW_PROGRESS						// Define to show each row instantly as it gets rendered
+#define MAX_VERTEXES 10000					// Maximum number of vertexes per mesh
+#define MAX_FACES 10000						// Maximum number of faces per mesh
+const int width = 640;						// Render area width in pixels
+const int height = 480;						// Render area height in pixels
+const tFloat contrastDiffuse = 0.05f;		// A multiplier to shading, to increase or decrease contrast of the overall image
+const tFloat contrastSpecular = 0.5f;		// A multiplier to shading, to increase or decrease contrast of the overall image
+const tFloat ambient = 0.0;					// Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
+const tFloat fov = 90.0;					// Field of vision (in degrees)
+const char* filename = "../go/ball.stl";    // File to load (the 3d mesh)
+const tFloat filescale = 100.0f;			// Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
+const tFloat speed = 0.25;					// Speed multiplier for animation
+
+// Include files
+#include <SDL2/SDL.h>
 #include <vector>
 #include <string>
 #include <iostream>
 #include <fstream>
+#ifdef USE_CPPTHREADS
+#include <thread>
+#endif
+#ifdef USE_WINDOWS
 #include <windows.h>
+#endif
+#ifdef USE_PTHREADS
+#include <pthread.h>
+#endif
 
+// We use so many std functions it's best to use that namespace
 using namespace std;
-
-/// <summary>
-/// Choose data type we use for floating points (double, float, ...)
-/// </summary>
-typedef float tFloat;
 
 /// <summary>
 /// Vertex structure
@@ -67,28 +95,7 @@ public:
 	Vertex *v;
 	int fCount;
 	int vCount;
-
-	~Mesh() {
-		delete f;
-		delete v;
-	}
 };
-
-// Consts (adjustable)
-#define THREADS 16							// How many threads to use in parallel rendering
-#undef USE_PTHREADS							// Define on POSIX threads system, undefine on Windows
-#undef SHOW_PROGRESS						// Define to show each row instantly as it gets rendered
-const int width = 640;						// Render area width in pixels
-const int height = 480;						// Render area height in pixels
-const tFloat contrastDiffuse = 0.05f;		// A multiplier to shading, to increase or decrease contrast of the overall image
-const tFloat contrastSpecular = 0.5f;		// A multiplier to shading, to increase or decrease contrast of the overall image
-const tFloat ambient = 0.0;					// Ambient brightness, between 0.0 (black is black) and 1.0 ("fullbright")
-const tFloat fov = 90.0;					// Field of vision (in degrees)
-const char* filename = "../go/ball.stl";    // File to load (the 3d mesh)
-const tFloat filescale = 100.0f;			// Scale for the file, as some meshes can be really big or really small (use 0.07 for duck2.stl and 100.0 for ball.stl)
-const tFloat speed = 0.25;					// Speed multiplier for animation
-#define MAX_VERTEXES 10000					// Maximum number of vertexes per mesh
-#define MAX_FACES 10000						// Maximum number of faces per mesh
 
 // Globals
 SDL_Window* window = NULL;
@@ -142,7 +149,7 @@ bool LoadSTL(string filename, Mesh &mesh)
 	// Parse distinct vertexes from the text, don't add duplicates. Also figure out size of the mesh.
 	for (vector<string>::iterator i = lines.begin(); i != lines.end(); ++i)
 	{
-		int n = sscanf_s(i->c_str(), "vertex %f %f %f\n", &x, &y, &z);
+		int n = sscanf(i->c_str(), "vertex %f %f %f\n", &x, &y, &z);
 		
 		if (n == 3) 
 		{
@@ -177,7 +184,7 @@ bool LoadSTL(string filename, Mesh &mesh)
 	
 	// Parse faces, which will be structured as three vertex polygons which vertex to each distinct vertex index
 	for (vector<string>::iterator i = lines.begin(); i != lines.end(); ++i)	{
-		int n = sscanf_s(i->c_str(), "vertex %f %f %f\n", &x, &y, &z);
+		int n = sscanf(i->c_str(), "vertex %f %f %f\n", &x, &y, &z);
 		if (n == 3) {
 			int va = FindVertex(x, y, z, mesh);
 			if (va >= 0) {
@@ -266,8 +273,8 @@ void CopyMesh(const Mesh &source, Mesh &target) {
 	// Can't use simple memcpy because of pointers
 	target.vCount = source.vCount;
 	target.fCount = source.fCount;
-	target.v = new Vertex[source.vCount/* MAX_VERTEXES */];
-	target.f = new Face[source.fCount/* MAX_FACES */];
+	target.v = new Vertex[source.vCount];
+	target.f = new Face[source.fCount];
 	for (int i = 0; i < source.vCount; i++) target.v[i] = source.v[i];
 	for (int i = 0; i < source.fCount; i++) target.f[i] = source.f[i];
 }
@@ -321,8 +328,12 @@ typedef struct
 /// </summary>
 #ifdef USE_PTHREADS
 void *Render(void* data) {
-#else
+#endif
+#ifdef USE_WINDOWS
 DWORD WINAPI Render(LPVOID data) {
+#endif
+#ifdef USE_CPPTHREADS
+void Render(RenderBag *data) {
 #endif
 	// Unpack parameters
 	RenderBag* bag = (RenderBag*)data;
@@ -418,20 +429,24 @@ DWORD WINAPI Render(LPVOID data) {
 		SDL_UpdateWindowSurface(window); // Update window for each row to show thread process independently
 #endif
 	}
-	
+
+#if defined(USE_WINDOWS) || defined(USE_PTHREADS)
 	return 0;
+#endif
 }
 
 // Engine thread, which keeps animating and rendering the scene, updating the frames to window
 void Engine(const Mesh &mesh) {
 	tFloat frame = 0;
-
 #ifdef USE_PTHREADS
 	pthread_t threads[THREADS];
-#else
+#endif
+#ifdef USE_WINDOWS
 	HANDLE threads[THREADS];
 #endif
-
+#ifdef USE_CPPTHREADS
+	thread *threads[THREADS];
+#endif
 	RenderBag bags[THREADS];
 
 	Uint32 engineStart = SDL_GetTicks();
@@ -475,24 +490,32 @@ void Engine(const Mesh &mesh) {
 			string threadName = "Render" + to_string(t);
 
 #ifdef USE_PTHREADS
-			int ret = pthread_create(&threads[t], NULL, Render, &bags[t]);
-#else
+			pthread_create(&threads[t], NULL, Render, &bags[t]);
+#endif
+#ifdef USE_WINDOWS
 			DWORD myThreadID;
 			threads[t] = CreateThread(0, 0, Render, &bags[t], 0, &myThreadID);
 			if (threads[t] == NULL) {
 				printf("Could not create a thread!\n");
 			}
 #endif
+#ifdef USE_CPPTHREADS
+			threads[t] = new thread(Render, &bags[t]);
+#endif
 		}
 
 		for (int t = 0; t < THREADS; t++) {
 #ifdef USE_PTHREADS
-			int ret = pthread_join(threads[t], NULL);
-#else
+			pthread_join(threads[t], NULL);
+#endif
+#ifdef USE_WINDOWS
 			if (threads[t] != NULL) {
 				WaitForSingleObject(threads[t], INFINITE);
 				CloseHandle(threads[t]);
 			}
+#endif
+#ifdef USE_CPPTHREADS
+			threads[t]->join();
 #endif
 		}
 		Uint32 frameDuration = SDL_GetTicks() - frameStart; // End taking time
@@ -501,8 +524,11 @@ void Engine(const Mesh &mesh) {
 
 		// Copy the rendered image on the window
 		SDL_UpdateWindowSurface(window);
-
 		frame += speed;
+
+		// Free a big reoccuring leak manually even though we have GC since C++11
+		delete transformed.v;
+		delete transformed.f;
 
 		// Handle SDL events
 		SDL_Event input;
